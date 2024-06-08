@@ -1,0 +1,15 @@
+name: "checkIngress"
+description: "Check if Ingress already exists in Infra-Repo"
+author: "fantasyflip"
+
+inputs:
+  namespace:
+    required: true
+    description: "Namespace for Kubernetes-files"
+  deployment-path:
+    required: true
+    description: "Path to the deployment files in the source repository"
+
+runs:
+  using: "node16"
+  main: "checkIngress.js"

@@ -1,0 +1,15 @@
+name: "mergeIngress"
+description: "Merge Ingress ruleset"
+author: "fantasyflip"
+
+inputs:
+  namespace:
+    required: true
+    description: "Namespace for Kubernetes-files"
+  deployment-path:
+    required: true
+    description: "Path to the deployment files in the source repository"
+
+runs:
+  using: "node16"
+  main: "mergeIngress.js"

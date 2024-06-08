@@ -1,0 +1,194 @@
+name: "Dockerize and push to Infra-Repo"
+description: "Dockerize application and push Kubernetes-files to Infra-Repo"
+author: "fantasyflip"
+
+inputs:
+  node-version:
+    required: true
+    description: "Node-Version for actions/setup-node@v3"
+  infra-repo:
+    required: true
+    description: "Repository to push Kubernetes-files to"
+  source-repo:
+    default: ${{ github.repository }}
+    required: false
+    description: "Repository to pull application from"
+  gh-token:
+    required: true
+    description: "GitHub Token for pushing and pulling to/from Infra-Repo"
+  source-branch:
+    default: "main"
+    required: false
+    description: "Branch to pull application from"
+  namespace:
+    required: true
+    description: "Namespace for Kubernetes-files"
+  app-name:
+    required: true
+    description: "Name of the application for the Infra-Repo"
+  deployment-path:
+    default: "deployment"
+    required: false
+    description: "Path to the deployment files in the source repository"
+
+runs:
+  using: "composite"
+  steps:
+    - name: Display inputs
+      shell: bash
+      run: |
+        echo "node-version: ${{ inputs.node-version }}"
+        echo "infra-repo: ${{ inputs.infra-repo }}"
+        echo "source-repo: ${{ inputs.source-repo }}"
+        echo "gh-token: ${{ inputs.gh-token }}"
+        echo "source-branch: ${{ inputs.source-branch }}"
+        echo "namespace: ${{ inputs.namespace }}"
+        echo "app-name: ${{ inputs.app-name }}"
+        echo "deployment-path: ${{ inputs.deployment-path }}"
+
+    - name: Setup Node.js
+      uses: actions/setup-node@v3
+      with:
+        node-version: ${{ inputs.node-version }}
+
+    - name: Checkout action repository
+      uses: actions/checkout@v3
+      with:
+        repository: fantasyflip/k8s-build-transfer
+        token: ${{ inputs.gh-token }}
+
+    - name: Checkout source repository
+      if: inputs.source-repo
+      uses: actions/checkout@v3
+      with:
+        repository: ${{ inputs.source-repo }}
+        token: ${{ inputs.gh-token }}
+        path: source
+        ref: ${{ inputs.source-branch }}
+
+    - name: Checkout this repo as source
+      if: ${{ !inputs.source-repo  }}
+      uses: actions/checkout@v3
+      with:
+        path: source
+        ref: ${{ inputs.source-branch }}
+
+    - name: Checkout infra code
+      uses: actions/checkout@v3
+      with:
+        repository: ${{ inputs.infra-repo }}
+        token: ${{ inputs.gh-token }}
+        path: infra
+
+    - name: Install dependencies
+      shell: bash
+      run: npm install
+
+    - name: run custom action
+      uses: ./actions/checkIngress/
+      with:
+        namespace: ${{ inputs.namespace }}
+        deployment-path: ${{ inputs.deployment-path }}
+
+    - name: Check if Ingress files are identical
+      if: env.RT_INGRESS_EXISTS == 'true'
+      uses: ./actions/checkIngressDiff/
+      with:
+        namespace: ${{ inputs.namespace }}
+        deployment-path: ${{ inputs.deployment-path }}
+
+    - name: Merge Ingress ruleset
+      if: env.RT_INGRESS_EXISTS == 'true' && env.RT_INGRESS_IDENTICAL == 'false'
+      uses: ./actions/mergeIngress/
+      with:
+        namespace: ${{ inputs.namespace }}
+        deployment-path: ${{ inputs.deployment-path }}
+
+    - name: Check if changes were made
+      if: env.RT_INGRESS_EXISTS == 'true' && env.RT_INGRESS_IDENTICAL == 'false'
+      shell: bash
+      run: |
+        if git diff --quiet namespace/${{inputs.namespace}}/ingress.json; then
+          echo "No changes made to ingress.json"
+          echo "RT_CHANGES_MADE=false" >> $GITHUB_ENV
+        else
+          echo "Changes made to ingress.json"
+          echo "RT_CHANGES_MADE=true" >> $GITHUB_ENV
+        fi
+      working-directory: infra
+
+    - name: Generate Commit Message
+      if: env.RT_CHANGES_MADE == 'true' || env.RT_INGRESS_EXISTS == 'false'
+      uses: ./actions/generateCommitMessage/
+      with:
+        repo-name: ${{ inputs.source-repo }}
+        namespace: ${{ inputs.namespace }}
+        app-name: ${{ inputs.app-name }}
+
+    - name: Commit and push changes to Infra-Repo
+      if: env.RT_CHANGES_MADE == 'true' || env.RT_INGRESS_EXISTS == 'false'
+      shell: bash
+      run: |
+        cd infra
+        git config --global user.name 'github-actions[bot]'
+        git config --global user.email 'github-actions[bot]@users.noreply.github.com'
+        git add namespace/${{inputs.namespace}}/ingress.json
+        git commit -m "${{ env.RT_COM_MSG }}"
+        git push
+      env:
+        GITHUB_TOKEN: ${{ inputs.gh-token }}
+
+    - name: Generate Image URL
+      uses: ./actions/generateImageUrl/
+      with:
+        repo-name: ${{ inputs.source-repo  }}
+        branch-name: ${{ inputs.source-branch || 'main' }}
+        sha: ${{ github.sha }}
+
+    - name: Set up QEMU
+      uses: docker/setup-qemu-action@v3
+      with:
+        platforms: arm64
+
+    - name: Set up Docker Buildx
+      uses: docker/setup-buildx-action@v3
+
+    - name: Log in to GitHub Container Registry
+      shell: bash
+      run: echo "${{ inputs.gh-token }}" | docker login ghcr.io -u ${{ github.actor }} --password-stdin
+
+    - name: Build and push Docker image to GitHub Container Registry
+      uses: docker/build-push-action@v5
+      with:
+        context: .
+        file: ./source/Dockerfile
+        push: true
+        platforms: linux/arm64
+        tags: ${{ env.RT_IMG_URL }}
+
+    - name: Update k8s deployment image
+      shell: bash
+      run: |
+        cd source
+        DEPLOYMENT_FILE="${{inputs.deployment-path}}/pod/deployment.yaml"
+        sed -i "s|ghcr.io/${{ inputs.source-repo  }}:.*|${{env.RT_IMG_URL}}|" $DEPLOYMENT_FILE
+        git config --global user.email "action@github.com"
+        git config --global user.name "k8s-deployment-action"
+        git add $DEPLOYMENT_FILE
+        git commit -m "chore(k8s): update deployment info [skip ci]"
+        git push
+      env:
+        GITHUB_TOKEN: ${{ inputs.gh-token }}
+
+    - name: Pushes deployment files to infra repo
+      uses: datalbry/copy_folder_to_another_repo_action@1.0.0
+      env:
+        API_TOKEN_GITHUB: ${{ inputs.gh-token }}
+      with:
+        source_folder: "source/${{inputs.deployment-path}}/pod/"
+        destination_repo: ${{ inputs.infra-repo }}
+        destination_folder: "namespace/${{ inputs.namespace }}/${{ inputs.app-name }}"
+        destination_branch: "main"
+        user_email: "katzenberger.ph+github@gmail.com"
+        user_name: "fantasyflip"
+        commit_msg: "chore(k8s): Copy pod ${{ inputs.app-name }} from ${{ inputs.source-repo }} to namespace ${{ inputs.namespace }} [CI][N=${{ inputs.namespace }}]"

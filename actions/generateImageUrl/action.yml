@@ -1,0 +1,18 @@
+name: "generateImageUrl"
+description: "Generate Image Url for ghcr"
+author: "fantasyflip"
+
+inputs:
+  repo-name:
+    description: "Name of the repository"
+    required: true
+  branch-name:
+    description: "Name of the branch"
+    required: true
+  sha:
+    description: "SHA of the commit"
+    required: true
+
+runs:
+  using: "node16"
+  main: "generateImageUrl.js"

@@ -1,0 +1,25 @@
+name: "Test"
+
+on:
+  push:
+    branches:
+      - main
+
+jobs:
+  test:
+    # only run if commit message contains '!test'
+    if: contains(github.event.head_commit.message, '!test')
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v3
+
+      - name: Dockerize and push to Infra-Repo
+        uses: ./
+        with:
+          node-version: 18
+          infra-repo: fantasyflip/k8s-copy-test
+          gh-token: ${{ secrets.GH_TOKEN }}
+          source-repo: fantasyflip/nuxt-k8s-template
+          namespace: nuxt-k8s-template
+          app-name: ${{ github.event.repository.name }}
