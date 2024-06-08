@@ -57,7 +57,7 @@ jobs:
       - name: Use Dockerize and Push to Infra-Repo Action
         uses: fantasyflip/k8s-build-transfer@v1
         with:
-          node-version: "14"
+          node-version: 18
           infra-repo: "your-org/infra-repo"
           gh-token: ${{ secrets.GITHUB_TOKEN }}
           namespace: "default"
@@ -106,7 +106,7 @@ jobs:
       - name: Dockerize and Push
         uses: fantasyflip/k8s-build-transfer@v1
         with:
-          node-version: "14"
+          node-version: 18
           infra-repo: "your-org/infra-repo"
           gh-token: ${{ secrets.GITHUB_TOKEN }}
           namespace: "production"
