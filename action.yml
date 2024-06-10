@@ -20,6 +20,10 @@ inputs:
     default: "main"
     required: false
     description: "Branch to pull application from"
+  infra-branch:
+    default: "main"
+    required: false
+    description: "Branch to pull infra repository from"
   namespace:
     required: true
     description: "Namespace for Kubernetes-files"
@@ -79,6 +83,7 @@ runs:
         repository: ${{ inputs.infra-repo }}
         token: ${{ inputs.gh-token }}
         path: infra
+        ref: ${{ inputs.infra-branch }}
 
     - name: Install dependencies
       shell: bash

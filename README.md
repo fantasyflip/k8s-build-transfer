@@ -13,6 +13,7 @@ This action automates the process of dockerizing an application and pushing the 
 - **`source-repo`** (optional, default: `${{ github.repository }}`): Repository to pull application from
 - **`gh-token`** (required): GitHub Token for pushing and pulling to/from Infra-Repo
 - **`source-branch`** (optional, default: `"main"`): Branch to pull application from
+- **`infra-branch`** (optional, default: `"main"`): Branch to pull and push Kubernetes-files from/to
 - **`namespace`** (required): Namespace for Kubernetes-files
 - **`app-name`** (required): Name of the application for the Infra-Repo
 - **`deployment-path`** (optional, default: `"deployment"`): Path to the deployment files in the source repository
