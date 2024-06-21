@@ -1,0 +1,15 @@
+name: "updateImageUrl"
+description: "Update the imageUrl in deployment.json"
+author: "fantasyflip"
+
+inputs:
+  deployment-file:
+    required: true
+    description: "Path to the deployment file in the source repository"
+  image-url:
+    required: true
+    description: "New image url"
+
+runs:
+  using: "node16"
+  main: "updateImageUrl.js"

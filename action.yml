@@ -172,14 +172,18 @@ runs:
         tags: ${{ env.RT_IMG_URL }}
 
     - name: Update k8s deployment image
+      uses: ./actions/updateImageUrl/
+      with:
+        image-url: ${{env.RT_IMG_URL}}
+        deployment-file: source/${{inputs.deployment-path}}/pod/deployment.json
+
+    - name: Commit and push deployment changes to source repository
       shell: bash
       run: |
         cd source
-        DEPLOYMENT_FILE="${{inputs.deployment-path}}/pod/deployment.yaml"
-        sed -i "s|ghcr.io/${{ inputs.source-repo  }}:.*|${{env.RT_IMG_URL}}|" $DEPLOYMENT_FILE
         git config --global user.email "action@github.com"
         git config --global user.name "k8s-deployment-action"
-        git add $DEPLOYMENT_FILE
+        git add ${{inputs.deployment-path}}/pod/deployment.json
         git commit -m "chore(k8s): update deployment info [skip ci]"
         git push
       env:

@@ -26,7 +26,7 @@ Ensure the following structure in your source repository:
 - **Deployment folder**: A folder named `deployment` containing:
   - `ingress.json`
   - A subfolder named `pod` with:
-    - `deployment.yaml`
+    - `deployment.json`
     - `service.yaml`
 
 Example structure:
@@ -38,9 +38,11 @@ your-repo/
 └── deployment/
     ├── ingress.json
     └── pod/
-        ├── deployment.yaml
+        ├── deployment.json
         └── service.yaml
 ```
+
+Note: The deployment file must be a `.json` file.
 
 ## 🛠️ Usage
 
