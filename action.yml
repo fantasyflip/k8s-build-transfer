@@ -16,6 +16,13 @@ inputs:
   gh-token:
     required: true
     description: "GitHub Token for pushing and pulling to/from Infra-Repo"
+  gh-username:
+    required: false
+    description: "GitHub Username for pushing and pulling to/from Infra-Repo"
+    default: ${{ github.actor }}
+  gh-email:
+    required: true
+    description: "GitHub Email for pushing and pulling to/from Infra-Repo"
   source-branch:
     default: "main"
     required: false
@@ -49,6 +56,8 @@ runs:
         echo "namespace: ${{ inputs.namespace }}"
         echo "app-name: ${{ inputs.app-name }}"
         echo "deployment-path: ${{ inputs.deployment-path }}"
+        echo "gh-username: ${{ inputs.gh-username }}"
+        echo "gh-email: ${{ inputs.gh-email }}"
 
     - name: Setup Node.js
       uses: actions/setup-node@v3
@@ -84,6 +93,14 @@ runs:
         token: ${{ inputs.gh-token }}
         path: infra
         ref: ${{ inputs.infra-branch }}
+
+    - name: Cache pnpm dependencies
+      uses: actions/cache@v3
+      with:
+        path: ~/.pnpm-store
+        key: pnpm-store-${{ runner.os }}-${{ hashFiles('source/pnpm-lock.yaml') }}
+        restore-keys: |
+          pnpm-store-${{ runner.os }}-
 
     - name: Install dependencies
       shell: bash
@@ -170,6 +187,8 @@ runs:
         push: true
         platforms: linux/arm64
         tags: ${{ env.RT_IMG_URL }}
+        cache-from: type=gha
+        cache-to: type=gha,mode=max
 
     - name: Update k8s deployment image
       uses: ./actions/updateImageUrl/
@@ -184,8 +203,12 @@ runs:
         git config --global user.email "action@github.com"
         git config --global user.name "k8s-deployment-action"
         git add ${{inputs.deployment-path}}/pod/deployment.json
-        git commit -m "chore(k8s): update deployment info [skip ci]"
-        git push
+        if git diff-index --quiet HEAD; then
+          echo "Warning: No changes to commit"
+        else
+          git commit -m "chore(k8s): update deployment info [skip ci]"
+          git push
+        fi
       env:
         GITHUB_TOKEN: ${{ inputs.gh-token }}
 
@@ -198,6 +221,6 @@ runs:
         destination_repo: ${{ inputs.infra-repo }}
         destination_folder: "namespace/${{ inputs.namespace }}/${{ inputs.app-name }}"
         destination_branch: "main"
-        user_email: "katzenberger.ph+github@gmail.com"
-        user_name: "fantasyflip"
+        user_email: ${{ inputs.gh-email }}
+        user_name: ${{ inputs.gh-username }}
         commit_msg: "chore(k8s): Copy pod ${{ inputs.app-name }} from ${{ inputs.source-repo }} to namespace ${{ inputs.namespace }} [CI][N=${{ inputs.namespace }}]"
