@@ -46,6 +46,16 @@ inputs:
 runs:
   using: "composite"
   steps:
+    # Sub-actions resolve from the job workspace, not the downloaded action
+    # package — checkout ensures ./actions/* paths work when consumed remotely.
+    - name: Checkout action repository
+      uses: actions/checkout@v4
+      with:
+        repository: fantasyflip/k8s-build-transfer
+        ref: ${{ github.action_ref }}
+        token: ${{ inputs.gh-token }}
+        fetch-depth: 1
+
     - name: Checkout source repository
       if: inputs.source-repo
       uses: actions/checkout@v4

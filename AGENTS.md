@@ -146,8 +146,12 @@ app-repo/
 
 - Docker build runs in the **background** while ingress steps execute
 - **ARM64 runners** (`ubuntu-24.04-arm`) skip QEMU and build natively
-- Dead steps removed: action-repo checkout, runner pnpm cache, `setup-node`, `npm install`
-- Docker `context: source` — app `.dockerignore` applies; infra tree excluded from build context
+- Dead steps removed: runner pnpm cache, `setup-node`, `npm install`
+- Docker `context: source` — app `.dockerignore` applies; infra/action files excluded from build context
+
+### Sub-action resolution
+
+Composite `uses: ./actions/*` paths resolve from the **job workspace**, not `$GITHUB_ACTION_PATH`. When consumed from another repo (e.g. `fantasyflip/fmdb`), an action-repo checkout to the workspace root is required. This does not affect Docker build speed because the build context is `source/` only.
 
 ### Testing
 
