@@ -131,15 +131,23 @@ app-repo/
 - **Node.js 16** for sub-actions; composite steps use **bash**
 - Only dependency: `@actions/core`
 - Sub-actions are JavaScript actions in `actions/*/action.yml` + `*.js`
-- Image builds are **linux/arm64 only** (QEMU + Buildx)
+- Image builds are **linux/arm64 only** — use `ubuntu-24.04-arm` runners; QEMU is set up only when `runner.arch != 'ARM64'`
+- Docker build uses `context: source` (consumer Dockerfiles must use standard `COPY` paths, not `COPY source/...`)
 - Image tag format: `{branch}-{full-sha}` — not semver or `:latest`
 
 ### Known quirks (preserve or fix deliberately)
 
 1. **Shared ingress per namespace** — multiple apps append rules; never overwrite the whole file
 2. **Duplicate host protection** — `mergeIngress` errors if host exists with different rules
-3. **Infra branch inconsistency** — ingress commits respect `infra-branch`, but pod copy via `datalbry/copy_folder_to_another_repo_action` hardcodes `destination_branch: "main"`
+3. **Single infra commit** — ingress changes and pod manifests are committed together in one push to `infra-branch` (fixed in v1.3.0; previously `copy_folder` hardcoded `main`)
 4. **Source repo round-trip** — `deployment.json` is committed back to app repo with `[skip ci]`
+
+### Performance (v1.3.0)
+
+- Docker build runs in the **background** while ingress steps execute
+- **ARM64 runners** (`ubuntu-24.04-arm`) skip QEMU and build natively
+- Dead steps removed: action-repo checkout, runner pnpm cache, `setup-node`, `npm install`
+- Docker `context: source` — app `.dockerignore` applies; infra tree excluded from build context
 
 ### Testing
 

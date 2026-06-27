@@ -1,41 +1,36 @@
 # Dockerize and Push to Infra-Repo GitHub Action
 
-🚀 **Dockerize and push to Infra-Repo**  
-A GitHub Action to Dockerize an application and push Kubernetes files to an infrastructure repository.
+Dockerize an application and push Kubernetes manifests to an infrastructure repository.
 
-📄 **Description**  
-This action automates the process of dockerizing an application and pushing the relevant Kubernetes deployment files to a specified infrastructure repository.
+## Description
 
-## ⚙️ Inputs
+This action automates:
 
-- **`node-version`** (required): Node-Version for `actions/setup-node@v3`
-- **`infra-repo`** (required): Repository to push Kubernetes-files to
-- **`source-repo`** (optional, default: `${{ github.repository }}`): Repository to pull application from
-- **`gh-token`** (required): GitHub Token for pushing and pulling to/from Infra-Repo
-- **`gh-username`** (optional, default: `${{ github.actor }}`): GitHub Username for pushing and pulling to/from Infra-Repo
-- **`gh-email`** (required): GitHub Email for pushing and pulling to/from Infra-Repo
-- **`source-branch`** (optional, default: `"main"`): Branch to pull application from
-- **`infra-branch`** (optional, default: `"main"`): Branch to pull and push Kubernetes-files from/to
-- **`namespace`** (required): Namespace for Kubernetes-files
-- **`app-name`** (required): Name of the application for the Infra-Repo
-- **`deployment-path`** (optional, default: `"deployment"`): Path to the deployment files in the source repository
+1. Building an **ARM64** Docker image and pushing it to **GHCR** (`ghcr.io/{repo}:{branch}-{sha}`)
+2. Patching `deployment.json` in the app repo with the new image URL (`[skip ci]`)
+3. Copying pod manifests to the infra repo
+4. Managing **namespace-level shared ingress** — merges new rules into `namespace/{namespace}/ingress.json`
 
-## 📂 Repository Structure Requirements
+## Inputs
 
-Ensure the following structure in your source repository:
+| Input | Required | Default | Description |
+|-------|----------|---------|-------------|
+| `infra-repo` | yes | — | Repository to push Kubernetes files to |
+| `gh-token` | yes | — | GitHub token for checkout and push |
+| `gh-email` | yes | — | Git email for infra/source commits |
+| `namespace` | yes | — | Kubernetes namespace |
+| `app-name` | yes | — | Application folder name in infra repo |
+| `source-repo` | no | `${{ github.repository }}` | Source application repository |
+| `gh-username` | no | `${{ github.actor }}` | Git author name for commits |
+| `source-branch` | no | `main` | Branch to build from |
+| `infra-branch` | no | `main` | Infra repo branch to read/write |
+| `deployment-path` | no | `deployment` | Path to deployment files in source repo |
+| `node-version` | no | `18` | **Deprecated** — no longer used; kept for backward compatibility |
 
-- **Dockerfile**: A `Dockerfile` must be present in the root of the repository.
-- **Deployment folder**: A folder named `deployment` containing:
-  - `ingress.json`
-  - A subfolder named `pod` with:
-    - `deployment.json`
-    - `service.yaml`
-
-Example structure:
+## Repository structure
 
 ```
 your-repo/
-│
 ├── Dockerfile
 └── deployment/
     ├── ingress.json
@@ -44,9 +39,11 @@ your-repo/
         └── service.yaml
 ```
 
-Note: The deployment file must be a `.json` file.
+`deployment.json` must be JSON, not YAML.
 
-## 🛠️ Usage
+## Usage
+
+Use an **ARM64 runner** for native builds (recommended). QEMU emulation on x86 is only used as a fallback when `runner.arch != 'ARM64'`.
 
 ```yaml
 name: Dockerize and Push to Infra-Repo
@@ -57,74 +54,86 @@ on:
 
 jobs:
   build:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04-arm
     steps:
       - name: Use Dockerize and Push to Infra-Repo Action
-        uses: fantasyflip/k8s-build-transfer@v1
+        uses: fantasyflip/k8s-build-transfer@v1.3.0
         with:
-          node-version: 18
           infra-repo: "your-org/infra-repo"
-          gh-token: ${{ secrets.GITHUB_TOKEN }}
-          namespace: "default"
-          app-name: "your-app"
-```
-
-## 📋 Steps
-
-1. **Display inputs**: Logs the provided inputs.
-2. **Setup Node.js**: Uses `actions/setup-node@v3` to set up Node.js.
-3. **Checkout repositories**:
-   - Action repository
-   - Source repository (if provided)
-   - Infra repository
-4. **Install dependencies**: Runs `npm install`.
-5. **Run custom action**: Executes `checkIngress` action with the provided inputs.
-6. **Check Ingress files**: Determines if the Ingress files are identical.
-7. **Merge Ingress ruleset**: Merges Ingress rules if needed.
-8. **Check for changes**: Verifies if changes were made to the Ingress file.
-9. **Generate commit message**: Creates a commit message based on changes.
-10. **Commit and push changes**: Pushes changes to the Infra-Repo if there are any.
-11. **Generate image URL**: Creates a Docker image URL.
-12. **Setup QEMU**: Uses `docker/setup-qemu-action@v3` for multi-platform builds.
-13. **Setup Docker Buildx**: Sets up Docker Buildx for building images.
-14. **Login to GitHub Container Registry**: Authenticates with GitHub Container Registry.
-15. **Build and push Docker image**: Builds and pushes the Docker image.
-16. **Update k8s deployment image**: Updates the Kubernetes deployment file with the new image URL.
-17. **Push deployment files**: Uses `datalbry/copy_folder_to_another_repo_action@1.0.0` to push the deployment files to the Infra-Repo.
-
-## 🌐 Example
-
-```yaml
-name: CI/CD Pipeline
-on:
-  push:
-    branches:
-      - main
-
-jobs:
-  deploy:
-    runs-on: ubuntu-latest
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@v3
-
-      - name: Dockerize and Push
-        uses: fantasyflip/k8s-build-transfer@v1
-        with:
-          node-version: 18
-          infra-repo: "your-org/infra-repo"
-          gh-token: ${{ secrets.GITHUB_TOKEN }}
+          gh-token: ${{ secrets.GH_TOKEN }}
+          gh-email: "you@example.com"
           namespace: "production"
           app-name: "your-app"
-          deployment-path: "deployment"
 ```
 
-## 🔄 Related Actions
+## Pipeline steps (v1.3.0)
 
-- [**`fantasyflip/k8s-receive-apply`**](https://github.com/fantasyflip/k8s-receive-apply): This action reacts to the commits made by this GitHub action to the infra-repo and applies the changes to Kubernetes. It can also manage Cloudflare DNS entries if needed.
+1. Checkout source and infra repositories (shallow, `fetch-depth: 1`)
+2. Generate image URL (`ghcr.io/{repo}:{branch}-{sha}`)
+3. Set up Docker Buildx (QEMU only on non-ARM runners)
+4. Start Docker build in **background** (`context: source`)
+5. Process ingress (check → diff → merge) **in parallel** with the build
+6. Wait for Docker build to complete
+7. Patch `deployment.json` with the new image URL
+8. Copy pod manifests into infra checkout and **single commit** (ingress + pod)
+9. Commit `deployment.json` back to source repo if changed
 
-## 📝 Notes
+## Migrating to v1.3.0
 
-- Ensure that the GitHub token provided has the necessary permissions to push to the Infra-Repo.
+### Breaking change: Docker build context
 
-Feel free to customize the inputs and steps according to your specific requirements!
+v1.3.0 uses `context: source` instead of `context: .`. Update your `Dockerfile` **before** upgrading:
+
+```dockerfile
+# Before (v1.2.x workaround)
+COPY source/package.json source/pnpm-lock.yaml ./
+COPY source/. .
+
+# After (v1.3.0)
+COPY package.json pnpm-lock.yaml ./
+COPY . .
+```
+
+Your app repo `.dockerignore` will now apply correctly during builds.
+
+### Recommended: ARM64 runner
+
+```yaml
+runs-on: ubuntu-24.04-arm
+```
+
+On x86 runners (`ubuntu-latest`), ARM64 images are built via QEMU emulation and are significantly slower (especially for Nuxt apps with native modules).
+
+### Optional: pnpm BuildKit cache mount
+
+For faster rebuilds in large apps:
+
+```dockerfile
+RUN --mount=type=cache,target=/root/.local/share/pnpm/store \
+    pnpm install --frozen-lockfile
+```
+
+### Consumer repos to update
+
+These fantasyflip apps use `k8s-build-transfer` and should adopt v1.3.0 with the Dockerfile and runner changes above:
+
+- `fantasyflip/fmdb` (updated in v1.3.0 rollout)
+- `fantasyflip/carity`
+- `fantasyflip/fantasyflip-nuxt`
+- `fantasyflip/byflip`
+- `fantasyflip/m8m-portfolio`
+- `fantasyflip/m8m-admin`
+- `fantasyflip/munchcoach`
+- `fantasyflip/munchcoach_no-ai`
+- `fantasyflip/cheese`
+- `fantasyflip/cooler-now`
+
+## Related actions
+
+- [`fantasyflip/k8s-receive-apply`](https://github.com/fantasyflip/k8s-receive-apply): Applies infra-repo commits tagged with `[CI]` to Kubernetes.
+
+## Notes
+
+- The GitHub token must have permission to push to the infra repo and GHCR.
+- Infra commits include `[CI][N={namespace}]` tags; new ingress commits also include `[H={hostname}]`.
+- v1.3.0 consolidates infra pushes into a single commit (ingress + pod), reducing duplicate `k8s-receive-apply` runs.

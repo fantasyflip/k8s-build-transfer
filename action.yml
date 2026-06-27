@@ -4,8 +4,9 @@ author: "fantasyflip"
 
 inputs:
   node-version:
-    required: true
-    description: "Node-Version for actions/setup-node@v3"
+    required: false
+    default: "18"
+    description: "Deprecated — no longer used. Kept for backward compatibility with existing workflows."
   infra-repo:
     required: true
     description: "Repository to push Kubernetes-files to"
@@ -45,68 +46,68 @@ inputs:
 runs:
   using: "composite"
   steps:
-    - name: Display inputs
-      shell: bash
-      run: |
-        echo "node-version: ${{ inputs.node-version }}"
-        echo "infra-repo: ${{ inputs.infra-repo }}"
-        echo "source-repo: ${{ inputs.source-repo }}"
-        echo "gh-token: ${{ inputs.gh-token }}"
-        echo "source-branch: ${{ inputs.source-branch }}"
-        echo "namespace: ${{ inputs.namespace }}"
-        echo "app-name: ${{ inputs.app-name }}"
-        echo "deployment-path: ${{ inputs.deployment-path }}"
-        echo "gh-username: ${{ inputs.gh-username }}"
-        echo "gh-email: ${{ inputs.gh-email }}"
-
-    - name: Setup Node.js
-      uses: actions/setup-node@v3
-      with:
-        node-version: ${{ inputs.node-version }}
-
-    - name: Checkout action repository
-      uses: actions/checkout@v3
-      with:
-        repository: fantasyflip/k8s-build-transfer
-        token: ${{ inputs.gh-token }}
-
     - name: Checkout source repository
       if: inputs.source-repo
-      uses: actions/checkout@v3
+      uses: actions/checkout@v4
       with:
         repository: ${{ inputs.source-repo }}
         token: ${{ inputs.gh-token }}
         path: source
         ref: ${{ inputs.source-branch }}
+        fetch-depth: 1
 
     - name: Checkout this repo as source
-      if: ${{ !inputs.source-repo  }}
-      uses: actions/checkout@v3
+      if: ${{ !inputs.source-repo }}
+      uses: actions/checkout@v4
       with:
         path: source
         ref: ${{ inputs.source-branch }}
+        fetch-depth: 1
 
     - name: Checkout infra code
-      uses: actions/checkout@v3
+      uses: actions/checkout@v4
       with:
         repository: ${{ inputs.infra-repo }}
         token: ${{ inputs.gh-token }}
         path: infra
         ref: ${{ inputs.infra-branch }}
+        fetch-depth: 1
 
-    - name: Cache pnpm dependencies
-      uses: actions/cache@v3
+    - name: Generate Image URL
+      uses: ./actions/generateImageUrl/
       with:
-        path: ~/.pnpm-store
-        key: pnpm-store-${{ runner.os }}-${{ hashFiles('source/pnpm-lock.yaml') }}
-        restore-keys: |
-          pnpm-store-${{ runner.os }}-
+        repo-name: ${{ inputs.source-repo }}
+        branch-name: ${{ inputs.source-branch || 'main' }}
+        sha: ${{ github.sha }}
 
-    - name: Install dependencies
+    - name: Set up QEMU
+      if: runner.arch != 'ARM64'
+      uses: docker/setup-qemu-action@v3
+      with:
+        platforms: arm64
+
+    - name: Set up Docker Buildx
+      uses: docker/setup-buildx-action@v3
+
+    - name: Log in to GitHub Container Registry
       shell: bash
-      run: npm install
+      run: echo "${{ inputs.gh-token }}" | docker login ghcr.io -u ${{ github.actor }} --password-stdin
 
-    - name: run custom action
+    - name: Start Docker build in background
+      shell: bash
+      run: |
+        # Build and push in the background so ingress work can run in parallel
+        docker buildx build \
+          --file source/Dockerfile \
+          --push \
+          --platform linux/arm64 \
+          --tag "${RT_IMG_URL}" \
+          --cache-from type=gha \
+          --cache-to type=gha,mode=max \
+          source > /tmp/docker-build.log 2>&1 &
+        echo $! > /tmp/docker-build.pid
+
+    - name: Check ingress in infra repo
       uses: ./actions/checkIngress/
       with:
         namespace: ${{ inputs.namespace }}
@@ -126,11 +127,12 @@ runs:
         namespace: ${{ inputs.namespace }}
         deployment-path: ${{ inputs.deployment-path }}
 
-    - name: Check if changes were made
+    - name: Check if ingress changes were made
       if: env.RT_INGRESS_EXISTS == 'true' && env.RT_INGRESS_IDENTICAL == 'false'
       shell: bash
       run: |
-        if git diff --quiet namespace/${{inputs.namespace}}/ingress.json; then
+        # Track whether mergeIngress produced a diff worth committing
+        if git diff --quiet namespace/${{ inputs.namespace }}/ingress.json; then
           echo "No changes made to ingress.json"
           echo "RT_CHANGES_MADE=false" >> $GITHUB_ENV
         else
@@ -139,7 +141,7 @@ runs:
         fi
       working-directory: infra
 
-    - name: Generate Commit Message
+    - name: Generate ingress commit message
       if: env.RT_CHANGES_MADE == 'true' || env.RT_INGRESS_EXISTS == 'false'
       uses: ./actions/generateCommitMessage/
       with:
@@ -147,62 +149,73 @@ runs:
         namespace: ${{ inputs.namespace }}
         app-name: ${{ inputs.app-name }}
 
-    - name: Commit and push changes to Infra-Repo
-      if: env.RT_CHANGES_MADE == 'true' || env.RT_INGRESS_EXISTS == 'false'
+    - name: Wait for Docker build
       shell: bash
       run: |
-        cd infra
-        git config --global user.name 'github-actions[bot]'
-        git config --global user.email 'github-actions[bot]@users.noreply.github.com'
-        git add namespace/${{inputs.namespace}}/ingress.json
-        git commit -m "${{ env.RT_COM_MSG }}"
-        git push
-      env:
-        GITHUB_TOKEN: ${{ inputs.gh-token }}
-
-    - name: Generate Image URL
-      uses: ./actions/generateImageUrl/
-      with:
-        repo-name: ${{ inputs.source-repo  }}
-        branch-name: ${{ inputs.source-branch || 'main' }}
-        sha: ${{ github.sha }}
-
-    - name: Set up QEMU
-      uses: docker/setup-qemu-action@v3
-      with:
-        platforms: arm64
-
-    - name: Set up Docker Buildx
-      uses: docker/setup-buildx-action@v3
-
-    - name: Log in to GitHub Container Registry
-      shell: bash
-      run: echo "${{ inputs.gh-token }}" | docker login ghcr.io -u ${{ github.actor }} --password-stdin
-
-    - name: Build and push Docker image to GitHub Container Registry
-      uses: docker/build-push-action@v5
-      with:
-        context: .
-        file: ./source/Dockerfile
-        push: true
-        platforms: linux/arm64
-        tags: ${{ env.RT_IMG_URL }}
-        cache-from: type=gha
-        cache-to: type=gha,mode=max
+        # Block until the background build finishes before patching deployment manifests
+        if wait "$(cat /tmp/docker-build.pid)"; then
+          echo "Docker build succeeded"
+        else
+          echo "::error::Docker build failed"
+          tail -n 200 /tmp/docker-build.log
+          exit 1
+        fi
 
     - name: Update k8s deployment image
       uses: ./actions/updateImageUrl/
       with:
-        image-url: ${{env.RT_IMG_URL}}
-        deployment-file: source/${{inputs.deployment-path}}/pod/deployment.json
+        image-url: ${{ env.RT_IMG_URL }}
+        deployment-file: source/${{ inputs.deployment-path }}/pod/deployment.json
+
+    - name: Copy pod manifests and push infra changes
+      shell: bash
+      run: |
+        POD_DEST="namespace/${{ inputs.namespace }}/${{ inputs.app-name }}"
+        INGRESS_PATH="namespace/${{ inputs.namespace }}/ingress.json"
+
+        # Copy pod manifests into the already-checked-out infra tree
+        mkdir -p "infra/${POD_DEST}"
+        cp -a "source/${{ inputs.deployment-path }}/pod/." "infra/${POD_DEST}/"
+
+        cd infra
+        git config user.name "${{ inputs.gh-username }}"
+        git config user.email "${{ inputs.gh-email }}"
+
+        git add "${POD_DEST}"
+
+        # Stage ingress when it was newly added or merged
+        if [ "${RT_INGRESS_EXISTS}" = "false" ] || [ "${RT_CHANGES_MADE}" = "true" ]; then
+          git add "${INGRESS_PATH}"
+        fi
+
+        # Skip push when pod and ingress are both unchanged
+        if git diff --staged --quiet; then
+          echo "No infra changes to commit"
+          exit 0
+        fi
+
+        # Prefer ingress commit message when ingress changed; otherwise pod-only message
+        if { [ "${RT_INGRESS_EXISTS}" = "false" ] || [ "${RT_CHANGES_MADE}" = "true" ]; } && [ -n "${RT_COM_MSG}" ]; then
+          COMMIT_MSG="${RT_COM_MSG}"
+        else
+          COMMIT_MSG="chore(k8s): Copy pod ${{ inputs.app-name }} from ${{ inputs.source-repo }} to namespace ${{ inputs.namespace }} [CI][N=${{ inputs.namespace }}]"
+        fi
+
+        git commit -m "${COMMIT_MSG}"
+        git push origin "${{ inputs.infra-branch }}"
+      env:
+        GITHUB_TOKEN: ${{ inputs.gh-token }}
+        RT_INGRESS_EXISTS: ${{ env.RT_INGRESS_EXISTS }}
+        RT_CHANGES_MADE: ${{ env.RT_CHANGES_MADE }}
+        RT_COM_MSG: ${{ env.RT_COM_MSG }}
 
     - name: Commit and push deployment changes to source repository
       shell: bash
       run: |
         cd source
-        git config --global user.email "action@github.com"
-        git config --global user.name "k8s-deployment-action"
-        git add ${{inputs.deployment-path}}/pod/deployment.json
+        git config user.email "${{ inputs.gh-email }}"
+        git config user.name "${{ inputs.gh-username }}"
+        git add ${{ inputs.deployment-path }}/pod/deployment.json
         if git diff-index --quiet HEAD; then
           echo "Warning: No changes to commit"
         else
@@ -211,16 +224,3 @@ runs:
         fi
       env:
         GITHUB_TOKEN: ${{ inputs.gh-token }}
-
-    - name: Pushes deployment files to infra repo
-      uses: datalbry/copy_folder_to_another_repo_action@1.0.0
-      env:
-        API_TOKEN_GITHUB: ${{ inputs.gh-token }}
-      with:
-        source_folder: "source/${{inputs.deployment-path}}/pod/"
-        destination_repo: ${{ inputs.infra-repo }}
-        destination_folder: "namespace/${{ inputs.namespace }}/${{ inputs.app-name }}"
-        destination_branch: "main"
-        user_email: ${{ inputs.gh-email }}
-        user_name: ${{ inputs.gh-username }}
-        commit_msg: "chore(k8s): Copy pod ${{ inputs.app-name }} from ${{ inputs.source-repo }} to namespace ${{ inputs.namespace }} [CI][N=${{ inputs.namespace }}]"
