@@ -151,7 +151,7 @@ app-repo/
 
 ### Sub-action resolution
 
-Composite `uses: ./actions/*` paths resolve from the **job workspace**, not `$GITHUB_ACTION_PATH`. When consumed from another repo (e.g. `fantasyflip/fmdb`), an action-repo checkout to the workspace root is required. This does not affect Docker build speed because the build context is `source/` only.
+Composite `uses: ./actions/*` paths resolve from the **job workspace**, not `$GITHUB_ACTION_PATH`. At job start, copy `actions/` and `utils.js` from `$GITHUB_ACTION_PATH` into the workspace (matches the consumer's pinned ref, no extra checkout). Do not use `github.action_ref` inside nested `actions/checkout@v4` steps — it resolves to `v4`, not the composite action tag.
 
 ### Testing
 
