@@ -51,8 +51,15 @@ runs:
     - name: Prepare sub-action files
       shell: bash
       run: |
+        # Materialize sub-actions into the workspace (uses: ./actions/* resolves here)
         cp -r "${GITHUB_ACTION_PATH}/actions" ./actions
         cp "${GITHUB_ACTION_PATH}/utils.js" ./utils.js
+        cp "${GITHUB_ACTION_PATH}/package.json" ./package.json
+        cp "${GITHUB_ACTION_PATH}/package-lock.json" ./package-lock.json
+
+    - name: Install action dependencies
+      shell: bash
+      run: npm ci --ignore-scripts
 
     - name: Checkout source repository
       if: inputs.source-repo
