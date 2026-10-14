@@ -11,5 +11,5 @@ inputs:
     description: "Path to the deployment files in the source repository"
 
 runs:
-  using: "node16"
+  using: "node24"
   main: "mergeIngress.js"

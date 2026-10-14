@@ -1,0 +1,20 @@
+# Copy to the app repo as .dockerignore — keeps the build context small and
+# stops local build output from leaking into (and invalidating) cached layers.
+.git
+.github
+.nuxt
+.output
+.data
+.pnpm-store
+node_modules
+dist
+coverage
+playwright-report
+test-results
+.env
+.env.*
+*.log
+.DS_Store
+Dockerfile
+.dockerignore
+deployment

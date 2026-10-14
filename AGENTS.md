@@ -113,7 +113,8 @@ app-repo/
 | `RT_CHANGES_MADE` | git diff step | Whether to commit ingress |
 | `RT_NEW_HOST` | checkIngress / mergeIngress | `[H=...]` tag in commit message |
 | `RT_COM_MSG` | generateCommitMessage | Infra ingress commit message |
-| `RT_IMG_URL` | generateImageUrl | Docker tag and deployment patch |
+| `RT_IMG_URL` | generateImageUrl | Docker tag and deployment patch (also action output `image-url`) |
+| `RT_CACHE_MOUNTS` | Detect cache mounts step | Whether to restore/inject/extract BuildKit cache mounts |
 
 ---
 
@@ -128,10 +129,10 @@ app-repo/
 
 ### Code conventions
 
-- **Node.js 16** for sub-actions; composite steps use **bash**
+- **Node.js 24** (`using: node24`) for sub-actions; composite steps use **bash**
 - Only dependency: `@actions/core`
 - Sub-actions are JavaScript actions in `actions/*/action.yml` + `*.js`
-- Image builds are **linux/arm64 only** — use `ubuntu-24.04-arm` runners; QEMU is set up only when `runner.arch != 'ARM64'`
+- Image builds are **linux/arm64 only**. App repos are private, so they run on x86 `ubuntu-latest`. Consumer Dockerfiles should build with `FROM --platform=$BUILDPLATFORM` (see `templates/Dockerfile.nuxt`) so only the runtime stage uses QEMU. QEMU is set up only when `runner.arch != 'ARM64'`
 - Docker build uses `context: source` (consumer Dockerfiles must use standard `COPY` paths, not `COPY source/...`)
 - Image tag format: `{branch}-{full-sha}` — not semver or `:latest`
 
@@ -142,16 +143,18 @@ app-repo/
 3. **Single infra commit** — ingress changes and pod manifests are committed together in one push to `infra-branch` (fixed in v1.3.0; previously `copy_folder` hardcoded `main`)
 4. **Source repo round-trip** — `deployment.json` is committed back to app repo with `[skip ci]`
 
-### Performance (v1.3.0)
+### Performance
 
-- Docker build runs in the **background** while ingress steps execute
-- **ARM64 runners** (`ubuntu-24.04-arm`) skip QEMU and build natively
-- Dead steps removed: runner pnpm cache, `setup-node`, `npm install`
-- Docker `context: source` — app `.dockerignore` applies; infra/action files excluded from build context
+- Before v1.3, ~85–90% of the job time was `pnpm build` under QEMU (7–10 min per app). The fix is cross-building in the consumer Dockerfile (`templates/Dockerfile.nuxt`), not something inside this action
+- In `mode: full`, the Docker build runs in the **background** while ingress steps execute. Each composite step is its own shell, so `wait <pid>` cannot be used across steps. The build writes its exit code to `$RUNNER_TEMP/docker-build.exit`, and the wait step polls for that file
+- `mode: build` / `mode: transfer` split the job so the build can run in parallel with consumer tests. `transfer` verifies that the image exists with `docker buildx imagetools inspect`
+- Layer cache: `type=gha` needs `crazy-max/ghaction-github-runtime` because `run:` steps don't get `ACTIONS_RUNTIME_TOKEN`. `registry` uses `ghcr.io/{repo}:buildcache`. Both use `ignore-error=true`
+- Cache mounts: `reproducible-containers/buildkit-cache-dance` + `actions/cache`, enabled automatically when the Dockerfile has `--mount=type=cache`
+- Docker `context: source`, so the app `.dockerignore` applies and infra/action files are excluded from the build context
 
 ### Sub-action resolution
 
-Composite `uses: ./actions/*` paths resolve from the **job workspace**, not `$GITHUB_ACTION_PATH`. At job start, copy `actions/` and `utils.js` from `$GITHUB_ACTION_PATH` into the workspace (matches the consumer's pinned ref, no extra checkout). Do not use `github.action_ref` inside nested `actions/checkout@v4` steps — it resolves to `v4`, not the composite action tag.
+Composite `uses: ./actions/*` paths resolve from the **job workspace**, not `$GITHUB_ACTION_PATH`. At job start, copy `actions/`, `utils.js`, and `package.json` from `$GITHUB_ACTION_PATH` into the workspace, then run `npm ci` so node16 sub-actions can resolve `@actions/core`.
 
 ### Testing
 
@@ -159,6 +162,7 @@ Integration test: `.github/workflows/test.yml`
 
 - Runs only when commit message contains `!test`
 - Uses `fantasyflip/k8s-copy-test` (infra) and `fantasyflip/nuxt-k8s-template` (source)
+- **Currently broken:** the repo has no `GH_TOKEN` secret, `fantasyflip/nuxt-k8s-template` does not exist, and the required `gh-email` input is missing. The last run (v1.3.0) failed before doing any work
 
 ---
 

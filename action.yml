@@ -42,21 +42,61 @@ inputs:
     default: "deployment"
     required: false
     description: "Path to the deployment files in the source repository"
+  mode:
+    default: "full"
+    required: false
+    description: >-
+      full = build image and transfer manifests in one job.
+      build = only build and push the image (run in parallel with tests).
+      transfer = skip the build, verify the image exists, then transfer manifests (run after tests and the build job).
+  cache-backend:
+    default: "gha"
+    required: false
+    description: "BuildKit layer cache: gha (GitHub Actions cache), registry (ghcr.io/{repo}:buildcache) or none"
+  cache-mode:
+    default: "max"
+    required: false
+    description: "BuildKit cache export mode: max (all stages, needed to cache dependency installs) or min (final image only)"
+  cache-mounts:
+    default: "auto"
+    required: false
+    description: "Persist Dockerfile RUN --mount=type=cache directories (e.g. pnpm store) between runs: auto (when the Dockerfile uses them), true or false"
+
+outputs:
+  image-url:
+    description: "Image reference that was built (build/full) or verified (transfer)"
+    value: ${{ steps.image-url.outputs.image-url }}
 
 runs:
   using: "composite"
   steps:
+    - name: Validate inputs
+      shell: bash
+      run: |
+        # Fail fast on typos instead of silently skipping steps
+        case "${{ inputs.mode }}" in full|build|transfer) ;; *) echo "::error::mode must be full, build or transfer"; exit 1;; esac
+        case "${{ inputs.cache-backend }}" in gha|registry|none) ;; *) echo "::error::cache-backend must be gha, registry or none"; exit 1;; esac
+        case "${{ inputs.cache-mode }}" in max|min) ;; *) echo "::error::cache-mode must be max or min"; exit 1;; esac
+        case "${{ inputs.cache-mounts }}" in auto|true|false) ;; *) echo "::error::cache-mounts must be auto, true or false"; exit 1;; esac
+
     # Sub-actions resolve from the job workspace, not the downloaded action
     # package — copy from GITHUB_ACTION_PATH (pinned consumer ref, no re-fetch).
     - name: Prepare sub-action files
       shell: bash
       run: |
+        # Materialize sub-actions into the workspace (uses: ./actions/* resolves here)
         cp -r "${GITHUB_ACTION_PATH}/actions" ./actions
         cp "${GITHUB_ACTION_PATH}/utils.js" ./utils.js
+        cp "${GITHUB_ACTION_PATH}/package.json" ./package.json
+        cp "${GITHUB_ACTION_PATH}/package-lock.json" ./package-lock.json
+
+    - name: Install action dependencies
+      shell: bash
+      run: npm ci --ignore-scripts
 
     - name: Checkout source repository
       if: inputs.source-repo
-      uses: actions/checkout@v4
+      uses: actions/checkout@v5
       with:
         repository: ${{ inputs.source-repo }}
         token: ${{ inputs.gh-token }}
@@ -66,14 +106,15 @@ runs:
 
     - name: Checkout this repo as source
       if: ${{ !inputs.source-repo }}
-      uses: actions/checkout@v4
+      uses: actions/checkout@v5
       with:
         path: source
         ref: ${{ inputs.source-branch }}
         fetch-depth: 1
 
     - name: Checkout infra code
-      uses: actions/checkout@v4
+      if: inputs.mode != 'build'
+      uses: actions/checkout@v5
       with:
         repository: ${{ inputs.infra-repo }}
         token: ${{ inputs.gh-token }}
@@ -82,61 +123,136 @@ runs:
         fetch-depth: 1
 
     - name: Generate Image URL
+      id: image-url
       uses: ./actions/generateImageUrl/
       with:
         repo-name: ${{ inputs.source-repo }}
         branch-name: ${{ inputs.source-branch || 'main' }}
         sha: ${{ github.sha }}
 
+    - name: Log in to GitHub Container Registry
+      shell: bash
+      run: echo "${{ inputs.gh-token }}" | docker login ghcr.io -u ${{ github.actor }} --password-stdin
+
+    # QEMU only runs the runtime stage's RUN steps; the Nuxt build itself should
+    # use FROM --platform=$BUILDPLATFORM (see templates/Dockerfile.nuxt).
     - name: Set up QEMU
-      if: runner.arch != 'ARM64'
+      if: inputs.mode != 'transfer' && runner.arch != 'ARM64'
       uses: docker/setup-qemu-action@v3
       with:
         platforms: arm64
 
     - name: Set up Docker Buildx
+      if: inputs.mode != 'transfer'
       uses: docker/setup-buildx-action@v3
 
-    - name: Log in to GitHub Container Registry
-      shell: bash
-      run: echo "${{ inputs.gh-token }}" | docker login ghcr.io -u ${{ github.actor }} --password-stdin
+    # type=gha needs ACTIONS_RUNTIME_TOKEN / cache URLs, which run: steps don't get by default
+    - name: Expose GitHub runtime for BuildKit cache
+      if: inputs.mode != 'transfer' && inputs.cache-backend == 'gha'
+      uses: crazy-max/ghaction-github-runtime@v4
 
-    - name: Start Docker build in background
+    - name: Detect Dockerfile cache mounts
+      if: inputs.mode != 'transfer'
       shell: bash
       run: |
-        # Build and push in the background so ingress work can run in parallel
-        docker buildx build \
-          --file source/Dockerfile \
-          --push \
-          --platform linux/arm64 \
-          --tag "${RT_IMG_URL}" \
-          --cache-from type=gha \
-          --cache-to type=gha,mode=max \
-          source > /tmp/docker-build.log 2>&1 &
-        echo $! > /tmp/docker-build.pid
+        # auto: only persist cache mounts when the Dockerfile actually declares some
+        CACHE_MOUNTS="${{ inputs.cache-mounts }}"
+        if [ "${CACHE_MOUNTS}" = "auto" ]; then
+          if grep -Eq -- '--mount=type=cache' source/Dockerfile; then CACHE_MOUNTS=true; else CACHE_MOUNTS=false; fi
+        fi
+        echo "Persist cache mounts: ${CACHE_MOUNTS}"
+        echo "RT_CACHE_MOUNTS=${CACHE_MOUNTS}" >> $GITHUB_ENV
+
+    - name: Restore cache mounts
+      id: cache-mounts
+      if: inputs.mode != 'transfer' && env.RT_CACHE_MOUNTS == 'true'
+      uses: actions/cache@v4
+      with:
+        path: buildkit-cache-mounts
+        key: buildkit-mounts-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('source/Dockerfile', 'source/**/pnpm-lock.yaml', 'source/**/package-lock.json', 'source/**/yarn.lock') }}
+        restore-keys: |
+          buildkit-mounts-${{ runner.os }}-${{ runner.arch }}-
+
+    # Post step extracts the mounts after the build; skipped on an exact cache hit (nothing new to save)
+    - name: Inject cache mounts into BuildKit
+      if: inputs.mode != 'transfer' && env.RT_CACHE_MOUNTS == 'true'
+      uses: reproducible-containers/buildkit-cache-dance@v3.4.0
+      with:
+        dockerfile: source/Dockerfile
+        cache-dir: buildkit-cache-mounts
+        skip-extraction: ${{ steps.cache-mounts.outputs.cache-hit }}
+
+    - name: Build Docker image
+      if: inputs.mode != 'transfer'
+      shell: bash
+      run: |
+        CACHE_ARGS=()
+        case "${{ inputs.cache-backend }}" in
+          gha)
+            CACHE_ARGS=(--cache-from type=gha --cache-to "type=gha,mode=${{ inputs.cache-mode }},ignore-error=true")
+            ;;
+          registry)
+            CACHE_REF="ghcr.io/${SOURCE_REPO,,}:buildcache"
+            CACHE_ARGS=(--cache-from "type=registry,ref=${CACHE_REF}" --cache-to "type=registry,ref=${CACHE_REF},mode=${{ inputs.cache-mode }},image-manifest=true,oci-mediatypes=true,ignore-error=true")
+            ;;
+        esac
+
+        build() {
+          docker buildx build \
+            --file source/Dockerfile \
+            --push \
+            --platform linux/arm64 \
+            --tag "${RT_IMG_URL}" \
+            "${CACHE_ARGS[@]}" \
+            source
+        }
+
+        if [ "${{ inputs.mode }}" = "full" ]; then
+          # Build in the background so ingress work runs in parallel. Each step is a
+          # separate shell, so `wait` can't be used later — record the exit code instead.
+          rm -f "${RUNNER_TEMP}/docker-build.exit"
+          ( build; echo $? > "${RUNNER_TEMP}/docker-build.exit" ) > "${RUNNER_TEMP}/docker-build.log" 2>&1 &
+          echo "Docker build started in background"
+        else
+          build
+        fi
+      env:
+        SOURCE_REPO: ${{ inputs.source-repo }}
+
+    - name: Verify image exists
+      if: inputs.mode == 'transfer'
+      shell: bash
+      run: |
+        # Transfer mode trusts a separate build job — make sure it actually pushed this tag
+        if ! docker buildx imagetools inspect "${RT_IMG_URL}" > /dev/null; then
+          echo "::error::Image ${RT_IMG_URL} not found. Run this action with mode: build for the same commit first."
+          exit 1
+        fi
+        echo "Found ${RT_IMG_URL}"
 
     - name: Check ingress in infra repo
+      if: inputs.mode != 'build'
       uses: ./actions/checkIngress/
       with:
         namespace: ${{ inputs.namespace }}
         deployment-path: ${{ inputs.deployment-path }}
 
     - name: Check if Ingress files are identical
-      if: env.RT_INGRESS_EXISTS == 'true'
+      if: inputs.mode != 'build' && env.RT_INGRESS_EXISTS == 'true'
       uses: ./actions/checkIngressDiff/
       with:
         namespace: ${{ inputs.namespace }}
         deployment-path: ${{ inputs.deployment-path }}
 
     - name: Merge Ingress ruleset
-      if: env.RT_INGRESS_EXISTS == 'true' && env.RT_INGRESS_IDENTICAL == 'false'
+      if: inputs.mode != 'build' && env.RT_INGRESS_EXISTS == 'true' && env.RT_INGRESS_IDENTICAL == 'false'
       uses: ./actions/mergeIngress/
       with:
         namespace: ${{ inputs.namespace }}
         deployment-path: ${{ inputs.deployment-path }}
 
     - name: Check if ingress changes were made
-      if: env.RT_INGRESS_EXISTS == 'true' && env.RT_INGRESS_IDENTICAL == 'false'
+      if: inputs.mode != 'build' && env.RT_INGRESS_EXISTS == 'true' && env.RT_INGRESS_IDENTICAL == 'false'
       shell: bash
       run: |
         # Track whether mergeIngress produced a diff worth committing
@@ -150,7 +266,7 @@ runs:
       working-directory: infra
 
     - name: Generate ingress commit message
-      if: env.RT_CHANGES_MADE == 'true' || env.RT_INGRESS_EXISTS == 'false'
+      if: inputs.mode != 'build' && (env.RT_CHANGES_MADE == 'true' || env.RT_INGRESS_EXISTS == 'false')
       uses: ./actions/generateCommitMessage/
       with:
         repo-name: ${{ inputs.source-repo }}
@@ -158,24 +274,34 @@ runs:
         app-name: ${{ inputs.app-name }}
 
     - name: Wait for Docker build
+      if: inputs.mode == 'full'
       shell: bash
       run: |
-        # Block until the background build finishes before patching deployment manifests
-        if wait "$(cat /tmp/docker-build.pid)"; then
+        # Block until the background build writes its exit code
+        while [ ! -f "${RUNNER_TEMP}/docker-build.exit" ]; do sleep 2; done
+        EXIT_CODE="$(cat "${RUNNER_TEMP}/docker-build.exit")"
+
+        echo "::group::Docker build log"
+        cat "${RUNNER_TEMP}/docker-build.log"
+        echo "::endgroup::"
+
+        if [ "${EXIT_CODE}" = "0" ]; then
           echo "Docker build succeeded"
         else
-          echo "::error::Docker build failed"
-          tail -n 200 /tmp/docker-build.log
+          echo "::error::Docker build failed (exit ${EXIT_CODE})"
+          tail -n 200 "${RUNNER_TEMP}/docker-build.log"
           exit 1
         fi
 
     - name: Update k8s deployment image
+      if: inputs.mode != 'build'
       uses: ./actions/updateImageUrl/
       with:
         image-url: ${{ env.RT_IMG_URL }}
         deployment-file: source/${{ inputs.deployment-path }}/pod/deployment.json
 
     - name: Copy pod manifests and push infra changes
+      if: inputs.mode != 'build'
       shell: bash
       run: |
         POD_DEST="namespace/${{ inputs.namespace }}/${{ inputs.app-name }}"
@@ -218,6 +344,7 @@ runs:
         RT_COM_MSG: ${{ env.RT_COM_MSG }}
 
     - name: Commit and push deployment changes to source repository
+      if: inputs.mode != 'build'
       shell: bash
       run: |
         cd source
