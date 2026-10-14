@@ -1,0 +1,65 @@
+# syntax=docker/dockerfile:1
+#
+# Reference Dockerfile for Nuxt apps deployed with k8s-build-transfer.
+#
+# The Nuxt/Vite/Nitro build runs on the runner's native arch ($BUILDPLATFORM)
+# instead of under QEMU — .output is plain JavaScript, so it runs on any arch.
+# Only the small runtime stage targets linux/arm64.
+#
+# Requires "packageManager" in package.json (e.g. "pnpm@9.15.9") for Corepack.
+
+# ---- Build stage: native runner arch, no emulation ----
+FROM --platform=$BUILDPLATFORM node:22-alpine AS build-stage
+
+ENV COREPACK_ENABLE_DOWNLOAD_PROMPT=0 \
+    NODE_OPTIONS="--max-old-space-size=4096" \
+    PNPM_STORE_DIR=/pnpm/store
+
+WORKDIR /app
+
+# Pin pnpm to package.json's packageManager (unpinned `npm i -g pnpm` breaks layer cache and lockfile verification)
+COPY package.json ./
+RUN corepack enable \
+  && corepack prepare "$(node -p "require('./package.json').packageManager")" --activate
+
+# Dependency manifests only, so this layer is cached until the lockfile changes.
+# Add pnpm-workspace.yaml / patches/ here if the app has them.
+COPY pnpm-lock.yaml ./
+
+# The store is a cache mount: k8s-build-transfer persists it between CI runs (cache-mounts: auto)
+RUN --mount=type=cache,id=pnpm-store,target=/pnpm/store \
+    pnpm install --frozen-lockfile --ignore-scripts --store-dir /pnpm/store
+
+COPY . .
+
+RUN pnpm build
+
+# ---- Optional: native modules for the target arch ----
+# Nitro copies native packages (sharp, @resvg/resvg-js, ...) into .output for the
+# BUILD arch. Packages that ship prebuilt binaries as optionalDependencies can be
+# fetched for the TARGET arch without emulation. Uncomment and pin versions to
+# match package.json, then uncomment the COPY lines in the runtime stage.
+#
+# FROM --platform=$BUILDPLATFORM node:22-alpine AS native-deps
+# ARG TARGETARCH
+# WORKDIR /deps
+# RUN case "${TARGETARCH}" in amd64) CPU=x64 ;; *) CPU="${TARGETARCH}" ;; esac \
+#   && npm init -y > /dev/null \
+#   && npm install --omit=dev --ignore-scripts --os=linux --cpu="${CPU}" --libc=musl \
+#        sharp@0.33.5
+
+# ---- Runtime stage: target arch (linux/arm64) ----
+FROM node:22-alpine AS production-stage
+
+WORKDIR /app
+
+COPY --from=build-stage /app/.output ./
+
+# COPY --from=native-deps /deps/node_modules/sharp ./server/node_modules/sharp
+# COPY --from=native-deps /deps/node_modules/@img ./server/node_modules/@img
+
+# Packages that compile in an install script (e.g. better-sqlite3) can't be
+# cross-installed this way; rebuild them here instead — this RUN uses QEMU on
+# x86 runners, but only compiles one package rather than the whole app.
+
+CMD ["node", "server/index.mjs"]

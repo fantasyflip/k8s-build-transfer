@@ -11,5 +11,5 @@ inputs:
     description: "New image url"
 
 runs:
-  using: "node16"
+  using: "node24"
   main: "updateImageUrl.js"

@@ -14,5 +14,9 @@ inputs:
     required: true
 
 runs:
-  using: "node16"
+  using: "node24"
   main: "generateImageUrl.js"
+
+outputs:
+  image-url:
+    description: "Generated ghcr.io image reference"
